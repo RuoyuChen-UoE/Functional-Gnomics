@@ -1,0 +1,496 @@
+---
+title: "ICA1"
+author: "Chloe"
+date: "2024-04-11"
+output:
+  pdf_document: default
+  html_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Affymetrix Microarray Analysis Basic (Skeleton) Workflow
+## 1.Load the required libraries & load the files for the workflow
+### modified from BasicAnalysisScript.Rmd & FGT_T3_Notes
+
+```{r libload, echo=TRUE}
+
+# Commands to download and install the repackage
+# These packages are already installed on the class computer
+#Copy this code and uncomment the three commands below to
+#install the required files on another machine
+#
+#if (!requireNamespace("BiocManager", quietly = TRUE))
+# install.packages("BiocManager")
+# BiocManager::install("affy")
+# BiocManager::install("limma")
+
+# load the required libraries
+library(limma)
+library(affy)
+library(annotate)
+library(mouse4302.db)# load chip-specific annotation
+library(GEOquery)
+
+#install.packages("scatterplot3d",repo="http://cran.ma.imperia#l.ac.uk")
+#Then load the library
+library(scatterplot3d)
+```
+
+## 2.Load the main data using GEOquery
+### modified from BasicAnalysisScript.Rmd 
+### & https://www.bioconductor.org/packages/release/bioc/vignettes/GEOquery/inst/doc/GEOquery.html
+
+```{r dataload, echo=TRUE}
+# downloads the supplementary files and sets their location in the filePaths object
+#dataset <- readline(prompt="Please input dataset number (e.g. GSE63996): ")
+dataset <- "GSE63996"
+filePaths <- getGEOSuppFiles(dataset)
+
+
+#Unpack downloaded files.
+rownames(filePaths[1])
+dir()
+
+dataset_dir <- dataset
+dataset_dir
+dir(dataset_dir)
+setwd(dataset_dir)
+getwd()
+
+system(paste("tar -xvf", dataset, "_RAW.tar", sep=""))
+system("gzip -d *.gz")
+cel_files <- list.files(pattern = "\\.CEL$", full.names = TRUE)
+cel_files
+# setwd("..")
+
+#Grap all the data as an ExpresssionSet object
+#Actually this is a list of objects(to support multiple data sets being returned)
+#Here we just use the first element of this list (since we know to expect a single match)
+gds <- getGEO(dataset, destdir = ".")
+gds <-gds[[1]]
+gds
+
+#Access the required information from the ExpressionSet object gds
+#Stored in the phenotypic data slot of the object
+#Access using accessor function phenoData
+phenoData(gds)
+sample_names <- phenoData(gds)$title
+geo_accessions <- rownames(phenoData(gds))
+
+mydata <- ReadAffy(filenames=cel_files)
+
+summary(mydata)
+setwd("..")
+
+cel_files_cleaned <- gsub("^\\./", "", cel_files)
+#Build the final table from the data extracted from the GDS object
+targets_tab <- data.frame(
+  Name = sample_names,
+  Filename = cel_files_cleaned
+)
+
+targets_tab
+
+write.table(targets_tab, file="targets_tab.txt", sep="\t", quote=FALSE, row.names=FALSE)
+
+```
+
+## 3.quality control plot
+### 3.1 Probe-Level QC Chart
+#### modified from https://www.jianshu.com/p/1d014d910f85
+```{r qc_plots1, echo=FALSE}
+library(simpleaffy)
+data.qc <- qc(mydata) 
+plot(data.qc)
+```
+### 3.2quality control plot--RNA degradation plot
+#### modified from https://www.jianshu.com/p/1d014d910f85
+```{r qc_plots1, echo=FALSE}
+data.deg <- AffyRNAdeg(mydata) 
+colors <- rainbow(length(rownames(pData(mydata))))
+plotAffyRNAdeg(data.deg, col=colors)
+
+legend("topleft", legend=rownames(pData(mydata)), col=colors, lwd=1, inset=0.05, cex=0.5)
+
+```
+### 3.3 Build Quality Control Plot--histogram
+### 3.4 Build Quality Control Plot--boxplot
+#### modified from FGT_T2_notes &
+#### https://www.math.pku.edu.cn/teachers/lidf/docs/Rbook/html/_Rbook/ggplot2.html
+```{r qc_plots1, echo=FALSE}
+library(ggplot2)
+library(reshape2)
+
+# Extract expression data matrix from gds
+expr_data <- exprs(mydata)
+
+# Transpose and convert expression data matrices to long format data frames
+expr_data_long <- melt(as.data.frame(t(expr_data)), variable.name = "Name", value.name = "Expression")
+
+# Add sample name as a grouping variable
+expr_data_long$Name <- rep(sample_names, each = nrow(expr_data))
+
+# Log-transformed expression values to avoid the impact of outliers on visual presentation
+expr_data_long$Log2Expression <- log2(expr_data_long$Expression + 1)
+
+cols_density <- rainbow(6)
+cols2 <- c(rep("blue", 3), rep("red", 3))
+
+# histogram
+p1 <- ggplot(expr_data_long, aes(x = Log2Expression, color = Name)) +
+  geom_density() +
+  scale_color_manual(values=cols_density) + 
+  theme_minimal() +
+  labs(title = "Density Plot of Log2-transformed Expression Levels", x = "Log2(Expression Level)", y = "density")
+
+
+# Plotting box plots
+p2 <- ggplot(expr_data_long, aes(x = Name, y = Log2Expression, fill = Name)) +
+  geom_boxplot() +
+  scale_fill_manual(values = cols2) +
+  theme_minimal() +
+  labs(title = "Boxplot of Log2-transformed Expression Levels by Sample", x = "Sample", y = "Log2(Expression Level)") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) # Adjust the angle to avoid overlapping text
+
+# show plot
+print(p1)
+print(p2)
+
+#save the image
+#ggsave(filename = "density_plot.png", plot = p1, width = 8, height = 6, units = "in")
+#ggsave(filename = "boxplot.png", plot = p2, width = 8, height = 6, units = "in")
+```
+## 4. Normalise the data using RMA
+```{r normalise, echo=FALSE}
+eset <- rma(mydata)
+eset
+# To obtain a matrix of the expression values, use exprs() 
+values <- exprs(eset)
+```
+## 5.Plot Normalised Data
+### 5.1 boxplot
+### 5.2 MVA plot
+```{r plot_normalised, echo=FALSE}
+# Extract expression data matrix from gds
+expr_data <- values
+sample_names <- colnames(values)
+# Transpose and convert expression data matrices to long format data frames
+expr_data_long <- melt(as.data.frame(t(expr_data)), variable.name = "Sample", value.name = "Expression")
+
+# Add sample name as a grouping variable
+expr_data_long$Name <- rep(sample_names, each = nrow(expr_data))
+
+# Log-transformed expression values to avoid the impact of outliers on visual presentation
+expr_data_long$Log2Expression <- log2(expr_data_long$Expression + 1)
+
+cols_density <- rainbow(6)
+cols2 <- c(rep("blue", 3), rep("red", 3))
+
+# histogram
+p1 <- ggplot(expr_data_long, aes(x = Log2Expression, color = Name)) +
+  geom_density() +
+  scale_color_manual(values=cols_density) + 
+  theme_minimal() +
+  labs(title = "Density plot: normalised Log2 transformed expression levels", x = "Log2(Expression Level)", y = "density")
+
+print(p1)
+```
+
+
+```{r plot_normalised, echo=FALSE}
+# plot normalized boxplot
+# png("MVA_plot.png", width=800, height=600) 
+boxplot(values, col=cols2,las=2)
+
+mva.pairs(pm(mydata))
+mva.pairs(values)
+#dev.off()
+```
+## 5.4 Perform PCA
+```{r pca_normalised, echo=FALSE}
+
+pca <- prcomp(t(values), scale=T)
+
+
+# Plot the PCA results--3d
+png("PCA.png", width=800, height=600) 
+s3d<-scatterplot3d(pca$x[,1:3], pch=19, color=rainbow(1))
+s3d.coords <- s3d$xyz.convert(pca$x[,1:3])
+text(s3d.coords$x, s3d.coords$y, labels = colnames(values),pos = 3,offset = 0.5)
+# dev.off()
+```
+## 5.5.Plot Heatmap
+```{r heatmap_normalised, echo=FALSE}
+# To facilitate interpretation, let’s replace the columns # # header,currently
+# displaying the filename, to show the name of each sample 
+# (if you have a targets file)
+
+#png("hierarchical_clustering.png", width=800, height=600) 
+# Performs hierarchical clustering with average linkage based on
+# Pearson’s Correlation Coefficient
+hc<-hclust(as.dist(1-cor(values, method="pearson")), method="average")
+plot(hc)
+#dev.off()
+
+```
+
+## 7. difference expression
+### 7.1 Perform fold filtering
+```{r fold_filtering, echo=TRUE}
+
+#obtaining a matrix of expression values
+exprsvals <- exprs(eset)
+#RMA outputs log2 data while MAS5 outputs linear data
+#To convert from log…
+exprsvals10 <-2^exprsvals
+#check conversion
+exprsvals[1:10,]
+#converted
+exprsvals10[1:10,]
+
+#More fold filtering
+#check order of sample names
+mysamples <- sampleNames(eset)
+#display the list
+mysamples
+#it is useful to obtain a vector of ProbeIDs here
+probesets <- featureNames(mydata)
+
+#display the first 10 ProbeSets
+probesets[1:10]
+
+#Build final fold table
+#Calculate the means
+#Note mean of the log is not the same as the log of the mean!!
+Control.mean <- apply(exprsvals10[,c("GSM1562210_PreB_Ctrl1.CEL", "GSM1562211_PreB_Ctrl2.CEL","GSM1562212_PreB_Ctrl3.CEL")],1,mean)
+Treatment.mean  <- apply(exprsvals10[,c("GSM1562213_PreB_Mut1.CEL", "GSM1562214_PreB_Mut2.CEL","GSM1562215_PreB_Mut3.CEL")],1,mean)
+
+# Calculate folding changes between control and treated groups
+Control_Treatment <- Control.mean / Treatment.mean
+#Control_Treatment
+#build a summary table to hold all the data
+all.data <- cbind(Control.mean, Treatment.mean, Control_Treatment)
+
+#check the column names
+# colnames(all.data)
+#write the table of means as an output
+write.table(all.data,file="group_means.txt", quote=F,
+sep="\t",col.names=NA)
+```
+## Beginning statistical analysis--sample rename and gene annotation
+```{r limma_stats, echo=TRUE}
+
+#Check original sample order
+sampleNames(eset)
+#Rename the samples
+targets_tab <- read.table("targets_tab.txt", header = TRUE, sep = "\t")
+sampleNames(eset) <- targets_tab$Name
+sampleNames(eset)
+
+```
+```{r building_annotation, echo=TRUE}
+##Building annotation for differential gene identification
+#establish annotation for MOE430v2
+#which annotation do we need
+#modified from #http://gettinggeneticsdone.blogspot.co.uk/2012/01/annotating-limma-#results-with-gene.html
+
+eset@annotation
+
+
+#packages in the annotation package
+ls("package:mouse4302.db")
+
+#build an annotation table
+ID <- featureNames(eset)
+Symbol <- getSYMBOL(ID, "mouse4302.db")
+Name <- as.character(lookUp(ID, "mouse4302.db", "GENENAME"))
+tmp <- data.frame(ID=ID, Symbol=Symbol, Name=Name, stringsAsFactors=F)
+tmp[tmp=="NA"] <- NA #fix padding with NA characters 
+#assign as feature data of the current Eset
+fData(eset) <- tmp
+```
+## Statistical analysis using Limma
+```{r limma_statistical_analysis, echo=TRUE}
+
+groups <- factor(c(rep("Ctrl", 3), rep("Mut", 3)))
+design <- model.matrix(~ 0 + groups)
+colnames(design) <- c("Ctrl", "Mut")
+
+#Check it makes sense
+sampleNames(eset)
+#output the design matrix
+design
+
+#This instructs Limma which comparisons to make
+contrastmatrix <- makeContrasts(Ctrl_vs_Mut = Ctrl - Mut, levels = design)
+contrastmatrix
+
+#issue these commands to fit the model
+#and make the contrasts
+fit <- lmFit(eset, design)
+
+fit2 <- contrasts.fit(fit, contrastmatrix)
+fit
+#this last part essentially moderates the t-statistic using 
+#the borrowed variance approach described in class
+fit2 <- eBayes(fit2)
+fit2
+#get the results
+topTable(fit2,coef=1,adjust="fdr")
+myresults <-topTable(fit2,coef=1, adjust="fdr", number=nrow(eset))
+write.table(myresults,"myresults.txt")
+
+#make a venn diagram
+clas <- classifyTestsF(fit2)
+vennDiagram(clas)
+```
+### HEAT map
+```{r heat_map, echo=TRUE}
+library(gplots)
+library(pheatmap)
+
+
+
+gene_ids <- rownames(myresults)
+expr_data <- exprs(eset)[gene_ids, ]
+ 
+heatmap(expr_data, 
+         scale = "row", 
+         clustering_distance_rows = "euclidean",
+         clustering_distance_cols = "euclidean",
+         clustering_method = "complete",
+         color = colorRampPalette(c("blue", "white", "red"))(50))  
+```
+### Identification of differentially expressed genes using Limma
+```{r gene_identification_limma, echo=TRUE}
+limma_top10 <- myresults[1:10, ]
+
+write.table(limma_top10, file="top_genes_limma.txt", sep="\t", quote=FALSE, row.names=FALSE)
+```
+
+### Identification of differentially expressed genes using Fold change
+```{r gene_identification_foldchange, echo=TRUE}
+gene_ids <- featureNames(eset)
+foldchange_data_with_ids <- data.frame(GeneID = gene_ids, all.data)
+top_fold_changes <- foldchange_data_with_ids[order(abs(foldchange_data_with_ids$Control_Treatment), decreasing = TRUE),][1:10,]
+
+log2_fold_change <- log2(foldchange_data_with_ids$Control_Treatment)
+foldchange_data_with_ids$log2FC <- log2_fold_change
+top_log2fc_genes <- foldchange_data_with_ids[order(abs(foldchange_data_with_ids$log2FC), decreasing = TRUE),][1:10,]
+write.table(top_log2fc_genes, file="top_genes_fold_change.txt", sep="\t", quote=FALSE, row.names=FALSE)
+
+# find common genes in two tables
+common_genes <- intersect(rownames(limma_top10), rownames(top_fold_changes))
+print(common_genes)
+```
+
+## Carry out Functional Enrichment analysis
+```{r functional_enrichment, echo=TRUE}
+
+Mm.H <- readRDS("/shared_files/MSigDB/Mm.h.all.v7.1.entrez.rds") 
+
+#Check that you have the required objects
+ls()
+
+#Show the full contents of the annotation package
+ls("package:mouse4302.db")
+
+#Show the annotation keys in this database
+keytypes(mouse4302.db) 
+
+sampleNames(eset)
+```
+## Process annotation for functional enrichment
+```{r process_annotation_for_enrichment, echo=TRUE}
+
+#Here we select from the annotation a number of keys with the primary key being PROBEID
+res <- select(mouse4302.db, keys = rownames(eset), columns = c("ENTREZID", "ENSEMBL","SYMBOL"), keytype="PROBEID")
+#View the top of the table
+head(res)
+#find the index of each row of the expression set in the #annotation object res
+idx <- match(rownames(eset), res$PROBEID)
+#Use the index to set the phenotypic data in the ExpressionSet
+fData(eset) <- res[idx, ]
+head(fData(eset), 10)
+#Find all rows that don’t have an EntrezID and remove then
+eset_t<-eset[is.na(fData(eset)$ENTREZID)==0,]
+```
+
+## Functional Enrichment Analysis--camera
+```{r convert_indicex, echo=TRUE}
+
+#convert to indexes
+H.indices <- ids2indices(Mm.H,fData(eset_t)$ENTREZID)
+#Pick the most suitable enrichment analysis tool to find #enrichment signatures in the data and run this tool So:-
+
+#if you want to run mroast
+#results <-mroast(eset_t,index=H.indices,design=design,contrast=contrastmatrix[,1],adjust.method = "BH")
+#if you want to run camera
+results <-camera(eset_t,
+ index=H.indices,
+ design=design,
+ contrast=contrastmatrix[,1])
+#if you want to run romer (takes 5mins or so)
+#if you want to run romer
+#results <-romer(eset_t,index=H.indices,design=design,contrast=contrastmatrix[,1],adjust.method = "BH")
+#View the results
+results
+#Use help for other parameters. Note we might decide to use #exactly the same model as our differential gene analysis for #the enrichment analysis- in this case we can extract it from #the fit
+sv <- squeezeVar(fit$sigma^2,df=fit$df.residual)
+write.table(results,"enrichment.txt",sep="\t")
+#You can then examine the results in “enrichment.txt”.  It is a text file.  It can be downloaded to view in a spreadsheet such as Excel.
+```
+## volcano plot
+## modified from https://www.jianshu.com/p/884415e37313
+```{r vocano_plot, echo=TRUE}
+
+myresults$negLogPval <- -log10(myresults$P.Value)
+
+
+ggplot(myresults, aes(x = logFC, y = negLogPval)) +
+  geom_point(aes(color = adj.P.Val < 0.05), alpha = 0.8) + 
+  scale_color_manual(values = c("grey", "red")) +  # Non-significant genes grey, significant genes red
+  theme_minimal() +  
+  labs(title = "Volcano Plot", x = "Log Fold Change", y = "-Log10 P-value") +  
+  theme(legend.position = "none")  
+
+
+```
+## lists of  differentially expressed genes
+```{r  differentially_expressed_genes, echo=TRUE}
+cut_off_logFC <- log2(2)  
+cut_off_fdr <- 0.1        
+
+
+top_genes_topTable <- topTable(fit2,coef=1, adjust="fdr", number=nrow(eset))
+top_genes_topTable_filtered <- subset(top_genes_topTable, abs(logFC) > cut_off_logFC & adj.P.Val < cut_off_fdr)
+genes_topTable <- rownames(top_genes_topTable_filtered)
+write.table(top_genes_topTable,"top_table.txt")
+
+
+#top_genes_topTreat <- topTreat(fit2, coef=1, number=Inf, lfc=cut_off_logFC)
+top_genes_topTreat <- topTreat(fit2,coef=1, adjust="fdr", number=nrow(eset))
+top_genes_topTreat_filtered <- subset(top_genes_topTreat, adj.P.Val < cut_off_fdr)
+genes_topTreat <- rownames(top_genes_topTreat_filtered)
+write.table(top_genes_topTreat,"top_treat.txt")
+
+
+genes_only_topTable <- setdiff(genes_topTable, genes_topTreat)
+genes_only_topTreat <- setdiff(genes_topTreat, genes_topTable)
+common_genes <- intersect(genes_topTable, genes_topTreat)
+
+write.table(top_genes_topTable_filtered, file="topTable_filtered_results.txt", sep="\t", row.names=TRUE, col.names=NA, quote=FALSE)
+write.table(top_genes_topTreat_filtered, file="topTreat_filtered_results.txt", sep="\t", row.names=TRUE, col.names=NA, quote=FALSE)
+
+
+cat("Number of genes found by topTable only:", length(genes_only_topTable), "\n")
+cat("Number of genes found by topTreat only:", length(genes_only_topTreat), "\n")
+cat("Number of common genes found by both methods:", length(common_genes), "\n")
+
+```
+
+
